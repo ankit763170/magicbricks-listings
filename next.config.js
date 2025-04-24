@@ -1,12 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  webpack: (config) => {
-    config.module.rules.push({
-      test: /\.css$/,
-      use: ['style-loader', 'css-loader'],
-    });
-    return config;
-  },
+  // Remove the webpack configuration that's causing issues
+  // with built-in CSS support
 };
 
 module.exports = nextConfig; 

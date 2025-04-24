@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
+import puppeteer from 'puppeteer';
+import { Project } from '@/types';
 
 const POSITIONSTACK_API_KEY = process.env.POSITIONSTACK_API_KEY;
 
@@ -122,7 +124,7 @@ async function scrapeMagicBricks(cityName: string) {
 }
 
 export async function GET(
-  request: NextRequest,
+  request: Request,
   { params }: { params: { cityName: string } }
 ) {
   try {
@@ -132,38 +134,74 @@ export async function GET(
       return NextResponse.json({ error: 'City name is required' }, { status: 400 });
     }
 
-    // Set up Server-Sent Events
-    const encoder = new TextEncoder();
-    const stream = new ReadableStream({
-      async start(controller) {
-        try {
-          const projects = await scrapeMagicBricks(cityName);
-          
-          // Send projects one by one with delay
-          for (const project of projects) {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ project })}\n\n`));
-            await new Promise(resolve => setTimeout(resolve, 1000));
-          }
-          
-          controller.close();
-        } catch (error) {
-          console.error('Stream error:', error);
-          controller.error(error);
-        }
-      },
+    const browser = await puppeteer.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox'],
     });
 
-    return new Response(stream, {
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-      },
+    const page = await browser.newPage();
+    await page.goto(`https://www.magicbricks.com/property-for-sale/residential-real-estate?proptype=Multistorey-Apartment,Builder-Floor-Apartment,Penthouse,Studio-Apartment&cityName=${cityName}`);
+
+    // Wait for the listings to load
+    await page.waitForSelector('.mb-srp__list');
+
+    const projects: Project[] = await page.evaluate(() => {
+      const listings = document.querySelectorAll('.mb-srp__list__item');
+      return Array.from(listings).map((listing) => {
+        const name = listing.querySelector('.mb-srp__card__title')?.textContent?.trim() || '';
+        const location = listing.querySelector('.mb-srp__card__summary--value')?.textContent?.trim() || '';
+        const price = listing.querySelector('.mb-srp__card__price--amount')?.textContent?.trim() || '';
+        const area = listing.querySelector('.mb-srp__card__summary--label')?.textContent?.trim() || '';
+        const developer = listing.querySelector('.mb-srp__card__developer--name')?.textContent?.trim() || '';
+        const description = listing.querySelector('.mb-srp__card__desc--text')?.textContent?.trim() || '';
+        const amenities = Array.from(listing.querySelectorAll('.mb-srp__card__summary--label'))
+          .map((amenity: Element) => amenity.textContent?.trim() || '')
+          .filter(Boolean);
+
+        return {
+          name,
+          location,
+          price,
+          area,
+          developer,
+          description,
+          amenities,
+        };
+      });
     });
+
+    await browser.close();
+
+    // Get coordinates for each project
+    const projectsWithCoordinates = await Promise.all(
+      projects.map(async (project) => {
+        try {
+          const response = await fetch(
+            `http://api.positionstack.com/v1/forward?access_key=${POSITIONSTACK_API_KEY}&query=${encodeURIComponent(
+              project.location
+            )}`
+          );
+          const data = await response.json();
+          if (data.data && data.data.length > 0) {
+            return {
+              ...project,
+              latitude: data.data[0].latitude,
+              longitude: data.data[0].longitude,
+            };
+          }
+          return project;
+        } catch (error) {
+          console.error('Error getting coordinates:', error);
+          return project;
+        }
+      })
+    );
+
+    return NextResponse.json(projectsWithCoordinates);
   } catch (error) {
-    console.error('Scraping error:', error);
+    console.error('Error scraping data:', error);
     return NextResponse.json(
-      { error: 'Failed to fetch projects' },
+      { error: 'Failed to scrape data' },
       { status: 500 }
     );
   }
